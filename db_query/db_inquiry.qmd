@@ -21,17 +21,14 @@ tryCatch({
                           dbname = Sys.getenv("aws_dbname"),
                           host = Sys.getenv("aws_host"),
                           port = Sys.getenv("aws_port"),
-                          user = "cori_zawacki",
-                          password = "hZ3m3tC3yrus9FvP",
+                          user = Sys.getenv("aws_user"),
+                          password = Sys.getenv("aws_password"),
                           timezone=NULL)
   cat("Connected!\n")
 },
 error=function(coms) {
   message("Unable to connect: ", coms$message, "\n")
 })
-
-
-
 
 ```
 
