@@ -50,25 +50,25 @@ wddir = here(ddir, "fulcrum", 'penn', '2024-09-13') # working data directory
 # can we run this in a withr statement, instead of leaving the connection hanging?
 
 tryCatch({
-    print("Connecting to Database…")
-    connection <- dbConnect(drv = dbDriver("Postgres"),
-                 dbname = Sys.getenv("aws_dbname"),
-                 host = Sys.getenv("aws_host"),
-                 port = Sys.getenv("aws_port"),
-                 user = Sys.getenv("aws_user"),
-                 password = Sys.getenv("aws_password"),
-                 timezone=NULL)
-    print("Database Connected!")
-    },
-    error=function(cond) {
-            print("Unable to connect to Database.")
-    })
+  cat("Connecting to database... ")
+  dbcon <- dbConnect(dbDriver("Postgres"),
+                          dbname = Sys.getenv("aws_dbname"),
+                          host = Sys.getenv("aws_host"),
+                          port = Sys.getenv("aws_port"),
+                          user = Sys.getenv("aws_user"),
+                          password = Sys.getenv("aws_password"),
+                          timezone=NULL)
+  cat("Connected!\n")
+},
+error=function(coms) {
+  message("Unable to connect: ", coms$message, "\n")
+})
 
-dbExecute(connection, "set search_path to survey_data")
+dbExecute(dbcon, "set search_path to survey_data")
 ```
 ## Pull metadata from database
 ```{r}
-metadata_columns = tbl(connection, "metadata_columns") %>%
+metadata_columns = tbl(dbcon, "metadata_columns") %>%
   collect()
 
 ```
@@ -77,25 +77,33 @@ metadata_columns = tbl(connection, "metadata_columns") %>%
 
 ```{r}
 
-pkey = function(table_str, metadata_columns=metadata_columns) {
+tbl_pkey = function(table_str, metadata_columns=metadata_columns) {
   metadata_columns %>%
     filter(table_name == table_str,
            key_type == "PK") %>%
     pull(column_name)
 }
 
-fkey = function(table_str, metadata_columns=metadata_columns) {
+tbl_fkey = function(table_str, metadata_columns=metadata_columns) {
   metadata_columns %>%
     filter(table_name == table_str,
            key_type == "FK") %>%
     pull(column_name)
 }
 
-nkey = function(table_str, metadata_columns=metadata_columns) {
+tbl_nkey = function(table_str, metadata_columns=metadata_columns) {
   metadata_columns %>%
     filter(table_name == table_str,
            natural_key) %>%
     pull(column_name)
+}
+
+tbl_keys = function(table_str, metadata_columns=metadata_columns) {
+  return(unique(c(
+    tbl_pkey(table_str, metadata_columns=metadata_columns),
+    tbl_nkey(table_str, metadata_columns=metadata_columns),
+    tbl_fkey(table_str, metadata_columns=metadata_columns)
+  )))
 }
 
 UUIDgenerate_if_NA = function(str) {
@@ -106,38 +114,55 @@ UUIDgenerate_if_NA = function(str) {
   }
 }
 
-# # in dev, not using currently
-# chains = function(table, metadata_columns) {
-#   chains = list()
-#   key_list = list()
-#   tab_list = list()
-#   
-#   tray = list()
-#   
-#   tab_list = append(tab_list, table)
-#   
-#   current_table = table
-#   
-#   fkey = metadata_columns %>%
-#     filter(table_name == current_table,
-#            key_type == "FK") %>%
-#     pull(column_name)
-#   
-#   if (length(fkey) > 1) {
-#     for (ff in fkey) {
-#       # handle multiple chains
-#     }
-#   }
-#   
-#   parent_table = metadata_columns %>%
-#     filter(column_name == fkey,
-#            key_type == "PK") %>%
-#     pull(table_name)
-#   
-#   tab_list = append(tab_list, parent_table)
-#   key_list = append(key_list, fkey)
-#   
-# }
+# in dev
+
+tbl_name = "aural"
+
+# link 1 table(s) up
+tbl_link = function(tbl_name, metadata_columns) {
+  link = list()
+  link[["root"]] = tbl_name
+  
+  parents = list()
+  
+  tbl_current = tbl_name
+  
+  fkey_vec = tbl_fkey(tbl_name, metadata_columns)
+  
+  for (ff in 1:length(fkey_vec)) {
+    fkey = fkey_vec[ff]
+    
+    tbl_parent = metadata_columns %>%
+      filter(column_name == fkey,
+             key_type == "PK") %>%
+      pull(table_name)
+    
+    nkey = tbl_nkey(tbl_parent, metadata_columns)
+    
+    parents[[ff]] = list(name=tbl_parent,
+                     pkey=fkey,
+                     nkey=nkey)
+  }
+  link[["parents"]] = parents
+  return(link)
+}
+
+
+tbl_join = function(dbcon, chain) {
+  
+  tbl = tbl(dbcon, chain$root)
+  
+  for (ii in 1:length(chain$parents)) {
+    tbl_next = tbl(dbcon, chain$parents[[ii]]$name)
+    
+    tbl = tbl %>%
+      left_join(tbl_next, by = c(chain$parents[[ii]]$pkey))
+  }
+  
+  return(tbl)
+}
+
+
 
 ```
 
@@ -147,14 +172,56 @@ UUIDgenerate_if_NA = function(str) {
 
 ```{r}
 # pull relevant chain tables from DB
-db_aural = tbl(connection, "aural")
-db_capture = tbl(connection, "capture")
-db_ves = tbl(connection, "ves")
-db_survey = tbl(connection, "survey")
-db_visit = tbl(connection, "visit")
-db_site = tbl(connection, "site")
-db_region = tbl(connection, "region")
-db_location = tbl(connection, "location")
+db_aural = tbl(dbcon, "aural")
+db_capture = tbl(dbcon, "capture")
+db_ves = tbl(dbcon, "ves")
+db_survey = tbl(dbcon, "survey")
+db_visit = tbl(dbcon, "visit")
+db_site = tbl(dbcon, "site")
+db_region = tbl(dbcon, "region")
+db_location = tbl(dbcon, "location")
+
+# link_support_tbls = function(tbl) {
+#   output = tbl %>%
+#     left_join(db_survey %>%
+#                 select(tbl_keys("survey", metadata_columns)) %>%
+#                 collect(),
+#               by = c("site", "date", "survey_time", "detection_type")) %>%
+#     left_join(db_visit %>%
+#                 select(tbl_keys("visit", metadata_columns)) %>%
+#                 collect(),
+#               by = c("site", "date", "survey_time")) %>%    
+#     left_join(db_site %>%
+#                 select(tbl_keys("site", metadata_columns)) %>%
+#                 collect(),
+#               by = "site") %>%
+#     left_join(db_region %>%
+#                 select(tbl_keys("region", metadata_columns)) %>%
+#                 collect(),
+#               by = "region_id") %>%
+#     left_join(db_location %>%
+#                 select( tbl_keys("location", metadata_columns)) %>%
+#                 collect(),
+#               by = "location_id")
+# }
+
+db_support_tbls = db_survey %>%
+  select(tbl_keys("survey", metadata_columns)) %>%
+  left_join(db_visit %>%
+              select(tbl_keys("visit", metadata_columns)),
+            by = c("visit_id")) %>%
+  left_join(db_site %>%
+              select(tbl_keys("site", metadata_columns)),
+            by = "site_id") %>%
+  left_join(db_region %>%
+              select(tbl_keys("region", metadata_columns)),
+            by = "region_id") %>%
+  left_join(db_location %>%
+              select( tbl_keys("location", metadata_columns)),
+            by = "location_id") %>%
+  collect()
+
+
 ```
 
 ```{r}
@@ -265,15 +332,16 @@ any(duplicated(raw_samp_process_obs))
    "geometry"
  )
 
-
 clean_survey_info <- raw_survey_info %>%
-  select(-any_of(to_drop)) %>%
+  select(-any_of(to_drop),
+         -survey_time,
+         -start_time,
+         -end_time) %>%
   clean_names() %>% 
   rename(visit_comments = sampling_event_comments) %>%
   mutate(site = str_to_lower(site),
          site = str_replace_all(site, "-", "_"),
-         site = str_replace_all(site, " ", "_"),
-         survey_time = str_to_lower(survey_time)) %>%
+         site = str_replace_all(site, " ", "_")) %>%
   filter(!if_all(everything(), is.na))  # drop any rows all null
 
 clean_aural_survey <- raw_aural_survey %>%
@@ -288,7 +356,8 @@ clean_aural_survey <- raw_aural_survey %>%
   filter(!if_all(everything(), is.na))  # drop any rows all null
 
 clean_aural_obs <- raw_aural_obs %>%
-  select(-any_of(to_drop)) %>%
+  select(-any_of(to_drop),
+         -fulcrum_record_id) %>%
   clean_names() %>%
   rename(species_aural = species_acoustic,
          species_aural_other = species_acoustic_other,
@@ -397,8 +466,79 @@ clean_samp_process_obs <- raw_samp_process_obs %>%
 
 ```
 
-# 3 - Unify data
-- "One chain at a time"
+
+## Handle special cases 
+```{r}
+
+# aquatic probe died, group returned later to measure. Comining two survey rows into one
+row_a = clean_survey_info %>%
+  filter(fulcrum_id == "eea59aa0-4bae-4a1b-afa9-59c7285fbfe9")
+row_b = clean_survey_info %>%
+  filter(fulcrum_id == "bbe6bef2-2ca6-43f3-b5e4-5db90f3ef82f")
+
+revision = row_a %>%
+  mutate(observers = paste0(row_a$observers, ",", row_b$observers),
+         water_temperature_measurement_time = row_b$water_temperature_measurement_time,
+         water_temperature_c = row_b$water_temperature_c,
+         total_dissolved_solids = row_b$total_dissolved_solids,
+         ph = row_b$ph)
+
+clean_survey_info = clean_survey_info %>%
+  filter(!fulcrum_id %in% c("eea59aa0-4bae-4a1b-afa9-59c7285fbfe9",
+                            "bbe6bef2-2ca6-43f3-b5e4-5db90f3ef82f")) %>%
+  bind_rows(revision)
+```
+
+# "One chain at a time"
+## Aural chain
+- aural / survey / visit / site / region / location
+
+### 3 - Unify aural data
+
+```{r}
+unified_aural = clean_aural_obs %>%
+  full_join(clean_aural_survey, by = c("fulcrum_parent_id" = "fulcrum_id")) %>%
+  select(-fulcrum_id,
+         -fulcrum_parent_id) %>%
+  left_join(clean_survey_info, by = c("site", "date")) %>%
+  left_join(db_site %>%
+              select(tbl_keys("site", metadata_columns)) %>%
+              collect(),
+            by = tbl_nkey("site", metadata_columns)) %>%
+  left_join(db_visit %>%
+              select(tbl_keys("visit", metadata_columns)) %>%
+              collect(),
+            by = tbl_nkey("visit", metadata_columns)) %>%
+  left_join(db_survey %>%
+              select(tbl_keys("survey", metadata_columns)) %>%
+              filter(!is.na(visit_id)) %>%
+              collect(),
+            by = tbl_nkey("survey", metadata_columns))
+
+if (any(is.na(unified_aural$site_id))) {
+  stop("unknown sites found. More rigorous coding needed :)")
+}
+
+```
+
+### 4 - Synthesize aural data
+
+```{r}
+synthesized_aural = unified_aural
+```
+
+## VES chain
+- ves / survey / visit / site / region / location
+
+```{r}
+unified_ves = clean_ves_obs %>%
+  full_join(clean_ves_survey, by = c("fulcrum_parent_id" = "fulcrum_id")) %>%
+  select(-fulcrum_id,
+         -fulcrum_parent_id) %>%
+  left_join(clean_survey_info, by = c("site", "date")) %>%
+  left_join(db_support_keys, by = c("site", "date", "detection_type", "survey_time"))
+
+```
 
 ## Capture chain
 - capture / survey / visit / site / region / location
@@ -529,7 +669,7 @@ if (any(is.na(final_visit$site_id))) {
 
 
 warningCondition("Visit append commented out. Rewrite at end as single transaction.")
-# dbAppendTable(connection, "visit", fin_visit)  # append at end in transaction
+# dbAppendTable(dbcon, "visit", fin_visit)  # append at end in transaction
   
 
 ```
@@ -674,7 +814,7 @@ fin_survey <- unique_survey_fkey %>%
   mutate(duration_minutes = as.integer(duration_minutes))# define properly above and delete
 
 warningCondition("Survey append commented out. Rewrite as single transaction.")  
-# dbAppendTable(connection, "survey", fin_survey) # don't drop fulcrum_id until here.
+# dbAppendTable(dbcon, "survey", fin_survey) # don't drop fulcrum_id until here.
 
 ```
 
@@ -769,7 +909,7 @@ q_col <- "SELECT *
           FROM capture
           LIMIT 1;"
 
-col_names <- dbGetQuery(connection, q_col) %>%
+col_names <- dbGetQuery(dbcon, q_col) %>%
   colnames()
 
 db_cols <- final_cap %>%
@@ -783,16 +923,16 @@ missing_cols <- setdiff(db_cols, col_names) %>%
 add_col_q <- paste0("alter table capture
                   add ", missing_cols[1]," varchar;")
 
-dbExecute(connection, add_col_q)
+dbExecute(dbcon, add_col_q)
 
 add_col_q <- paste0("alter table capture
                   add ", missing_cols[2]," varchar;")
 
-dbExecute(connection, add_col_q)
+dbExecute(dbcon, add_col_q)
 
 
 
-dbAppendTable(connection, "capture", final_cap)
+dbAppendTable(dbcon, "capture", final_cap)
 
 ```
 
@@ -844,7 +984,7 @@ unique_ves_fkey <- unique_ves %>%
 final_ves <- unique_ves_fkey %>% 
   select(!c(site, date, survey_time, detection_type))
 
-dbAppendTable(connection, "ves", final_ves)
+dbAppendTable(dbcon, "ves", final_ves)
 
 ```
 
@@ -896,7 +1036,7 @@ unique_aural_fkey <- unique_aural %>%
 final_aural <- unique_aural_fkey %>% 
   select(!c(site, date, detection_type, survey_time))
 
-dbAppendTable(connection, "aural", final_aural)
+# dbAppendTable(dbcon, "aural", final_aural)
 
 ```
 
@@ -912,6 +1052,6 @@ final_cmr <- cmr %>%
   rename(capture_mark_recapture = fulcrum_id,
          cmr_id = cmr)
 
-dbAppendTable(connection, "cmr", final_cmr)
+dbAppendTable(dbcon, "cmr", final_cmr)
 
 ```
