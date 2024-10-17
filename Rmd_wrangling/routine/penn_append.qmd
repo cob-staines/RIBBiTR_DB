@@ -164,19 +164,19 @@ unique_visits <- bind_rows(survey_info, survey_acoustic, survey_capture, survey_
 # can we run this in a withr statement, instead of leaving the connection hanging?
 
 tryCatch({
-    print("Connecting to Database…")
-    connection <- dbConnect(drv = dbDriver("Postgres"),
-                 dbname = Sys.getenv("aws_dbname"),
-                 host = Sys.getenv("aws_host"),
-                 port = Sys.getenv("aws_port"),
-                 user = Sys.getenv("aws_user"),
-                 password = Sys.getenv("aws_password"),
-                 timezone=NULL)
-    print("Database Connected!")
-    },
-    error=function(cond) {
-            print("Unable to connect to Database.")
-    })
+  cat("Connecting to database... ")
+  connection <- dbConnect(dbDriver("Postgres"),
+                          dbname = Sys.getenv("aws_dbname"),
+                          host = Sys.getenv("aws_host"),
+                          port = Sys.getenv("aws_port"),
+                          user = Sys.getenv("aws_user"),
+                          password = Sys.getenv("aws_password"),
+                          timezone=NULL)
+  cat("Connected!")
+},
+error=function(coms) {
+  message("Unable to connect: ", coms$message)
+})
 
 dbExecute(connection, "set search_path to survey_data")
 ```
