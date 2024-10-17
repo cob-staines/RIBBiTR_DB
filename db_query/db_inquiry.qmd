@@ -1,0 +1,47 @@
+---
+title: "db_inquiry"
+format: html
+editor: source
+---
+
+
+```{r}
+if (!require(librarian)){
+  install.packages("librarian")
+  library(librarian)
+}
+
+# librarian downloads, if not already downloaded, and reads in needed packages
+librarian::shelf(tidyverse, dbplyr, here, janitor, lubridate, RPostgres, stringr, DBI, parsedate, uuid, hms)
+
+
+tryCatch({
+  cat("Connecting to database... ")
+  dbcon <- dbConnect(dbDriver("Postgres"),
+                          dbname = Sys.getenv("aws_dbname"),
+                          host = Sys.getenv("aws_host"),
+                          port = Sys.getenv("aws_port"),
+                          user = "cori_zawacki",
+                          password = "hZ3m3tC3yrus9FvP",
+                          timezone=NULL)
+  cat("Connected!\n")
+},
+error=function(coms) {
+  message("Unable to connect: ", coms$message, "\n")
+})
+
+
+
+
+```
+
+```{r}
+bd_results = tbl(dbcon, Id("survey_data", "qpcr_bd_results")) %>%
+  group_by(bd_swab_id) %>%
+  mutate(count = n()) %>%
+  ungroup() %>%
+  filter(count > 1) %>%
+  arrange(desc(count)) %>%
+  collect()
+  
+```
