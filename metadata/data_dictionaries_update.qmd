@@ -13,11 +13,9 @@ if (!require(librarian)){
 
 # librarian downloads, if not already downloaded, and reads in needed packages
 librarian::shelf(tidyverse, DBI, RPostgres, here, janitor)
-```
 
 ## Connect to DB
 
-```{r}
 # establish connection
 tryCatch({
   print("Connecting to Database…")
@@ -125,7 +123,14 @@ dict_supplementary_mutate <- function(dict, supplementary) {
 tables_pkey = c("table_schema", "table_name")
 columns_pkey = c("table_schema", "table_name", "column_name")
 
+# dataframe_a = pg_column_data[[schema]] %>% collect()
+# dataframe_b = meta_column_data_pg[[schema]] %>% collect()
+# key_columns = columns_pkey
+# return_all = TRUE 
+
 compare_for_staging = function(dataframe_a, dataframe_b, key_columns, insert=TRUE, update=TRUE, orphan=FALSE, duplicate=FALSE, return_all=FALSE){
+  # dataframe_a is NEW data
+  # dataframe_b is OLD data
   
   output = list()
   
@@ -147,37 +152,42 @@ compare_for_staging = function(dataframe_a, dataframe_b, key_columns, insert=TRU
     count() %>%
     ungroup()
   
-  # case 2: unique to data_frame_a -> orphan
-  # logic: pkey compo found 1x in data_bind, from dataframe_a
+  data_bind_source = bind_rows(dataframe_a %>%
+                        mutate(d_source = "a"),
+                      dataframe_b %>%
+                        mutate(d_source = "b"))
+  
+  # case 2: unique to data_frame_b -> orphan
+  # logic: pkey compo found 1x in data_bind, from dataframe_b
   if (orphan || return_all){
     data_orphan = data_pkey_counts %>%
       filter(n == 1) %>%
       select(-n) %>%
-      inner_join(dataframe_a, by=key_columns)
+      inner_join(dataframe_b, by=key_columns)
       
     output[["orphan"]] = data_orphan
   }
 
   
-  # case 3: unique to data_frame_b -> insert
-  # logic: pkey combo found 1x in data_bind, from dataframe_b
+  # case 3: unique to data_frame_a -> insert
+  # logic: pkey combo found 1x in data_bind, from dataframe_a
   if (insert || return_all){
     data_insert = data_pkey_counts %>%
       filter(n == 1) %>%
       select(-n) %>%
-      inner_join(dataframe_b, by=key_columns)
+      inner_join(dataframe_a, by=key_columns)
     
     output[["insert"]] = data_insert
   }
 
   
-  # case 4: non-identical rows sharing pkeys -> update (from data_frame_b)
+  # case 4: non-identical rows sharing pkeys -> update (from data_frame_a)
   # logic: pkey combo found 2x in data_bind, is distinct among non-pkey columns
   if (update || return_all){
     data_update = data_pkey_counts %>%
       filter(n == 2) %>%
       select(-n) %>%
-      inner_join(dataframe_b, by=key_columns)
+      inner_join(dataframe_a, by=key_columns)
     
     output[["update"]] = data_update
   }
@@ -307,16 +317,16 @@ meta_column_update = list()
 meta_column_duplicate = list()
 
 for (schema in schemas) {
-  comp_results = compare_for_staging(pg_table_data[[schema]] %>%
+  table_results = compare_for_staging(pg_table_data[[schema]] %>%
                                        collect(),
                                      meta_table_data[[schema]] %>%
                                        collect(),
                                      tables_pkey,
                                      return_all= TRUE)
-  meta_table_insert[[schema]] = comp_results[["insert"]]
-  meta_table_orphan[[schema]] = comp_results[["orphan"]]
-  meta_table_update[[schema]] = comp_results[["update"]]
-  meta_table_duplicate[[schema]] = comp_results[["duplicate"]]
+  meta_table_insert[[schema]] = table_results$insert
+  meta_table_orphan[[schema]] = table_results$orphan
+  meta_table_update[[schema]] = table_results$update
+  meta_table_duplicate[[schema]] = table_results$duplicate
   
   column_results = compare_for_staging(pg_column_data[[schema]] %>%
                                          collect(),
@@ -324,11 +334,11 @@ for (schema in schemas) {
                                          collect(),
                                        columns_pkey,
                                        return_all=TRUE)
-  meta_column_insert[[schema]] = comp_results[["insert"]]
-  meta_column_orphan[[schema]] = comp_results[["orphan"]]
-  meta_column_update[[schema]] = comp_results[["update"]]
-  meta_column_duplicate[[schema]] = comp_results[["duplicate"]]
-
+  meta_column_insert[[schema]] = column_results$insert
+  meta_column_orphan[[schema]] = column_results$orphan
+  meta_column_update[[schema]] = column_results$update
+  meta_column_duplicate[[schema]] = column_results$duplicate
+  
   cat("Discrepancies processed for schema: ", schema, "\n")
 }
 
@@ -346,20 +356,20 @@ meta_column_upsert = list()
 for (schema in schemas) {
   # warnings for orphan data
   if (nrow(meta_table_orphan[[schema]]) > 0) {
-    warning(paste0("Table orphan data found in schema:", schema))
+    warning(paste0("Table orphan data found in schema: ", schema, ".\n\t Investigate 'meta_table_orphan$", schema, "' and resolve manually.\n"))
   }
   if (nrow(meta_column_orphan[[schema]]) > 0) {
-    warning(paste0("Column orphan data found in schema:", schema))
+    warning(paste0("Column orphan data found in schema: ", schema, ".\n\t Investigate 'meta_column_orphan$", schema, "' and resolve manually.\n"))
   }
   
   # flag if append needed
   if (nrow(meta_table_insert[[schema]]) > 0) {
-    append = TRUE
-    cat("Table appends found for schema: ", schema, "\n")
+    insert = TRUE
+    cat("Table inserts found for schema: ", schema, "\n")
   }
   if (nrow(meta_column_insert[[schema]]) > 0) {
-    append = TRUE
-    cat("Column appends found for schema: ", schema, "\n")
+    insert = TRUE
+    cat("Column inserts found for schema: ", schema, "\n")
   }
   
   # flag if updates needed
@@ -379,7 +389,7 @@ for (schema in schemas) {
   
 }
 
-cat("Updates: ", update, "\nInserts: ", insert, "\n")
+cat("-------------\nUpdate: ", update, "\nInsert: ", insert, "\n")
 ```
 
 ## create temporary DB tables with upsert data, and upsert
@@ -395,7 +405,8 @@ if (update || insert) {
         if (nrow(meta_table_upsert[[schema]]) > 0) {
           # upsert table_data
           reference_table = meta_table_data[[schema]]
-          novel_data = pg_table_data[[schema]] %>% collect()
+          # novel_data = pg_table_data[[schema]] %>% collect()
+          novel_data = meta_table_upsert[[schema]]
           temp_table_name = stage_to_temp(con, reference_table, novel_data)
           pointer = tbl(con, temp_table_name)
           rows_upsert(meta_table_data[[schema]], pointer, by=tables_pkey, in_place=TRUE)
@@ -406,7 +417,8 @@ if (update || insert) {
         if (nrow(meta_column_upsert[[schema]]) > 0) {
           # upsert column data
           reference_table = meta_column_data[[schema]]
-          novel_data = pg_column_data[[schema]] %>% collect()
+          # novel_data = pg_column_data[[schema]] %>% collect()
+          novel_data = meta_column_upsert[[schema]]
           temp_table_name = stage_to_temp(con, reference_table, novel_data)
           pointer = tbl(con, temp_table_name)
           rows_upsert(meta_column_data[[schema]], pointer, by=columns_pkey, in_place=TRUE)
